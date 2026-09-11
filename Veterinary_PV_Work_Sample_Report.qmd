@@ -1,0 +1,419 @@
+---
+title: "Synthetic Veterinary Pharmacovigilance Work Sample"
+subtitle: "Data quality, reporting trends and exploratory signal screening"
+author: "Yao Lu"
+date: today
+date-format: long
+format:
+  docx:
+    toc: false
+    number-sections: true
+    reference-doc: template.docx
+output-file: Veterinary_PV_Work_Sample_Report.docx
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+  cache: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(here)
+library(dplyr)
+library(knitr)
+
+# Keep this QMD in the same directory as the R project file.
+# Run analysis scripts 01 through 04 before rendering.
+
+result_files <- c(
+  prepared = here("output", "01_data_preparation", "01_prepared_data.rds"),
+  monthly = here("output", "02_monthly_trends", "02_monthly_trends.rds"),
+  periods = here("output", "03_period_comparison", "03_period_comparison.rds"),
+  screening = here("output", "04_disproportionality", "04_disproportionality.rds")
+)
+
+figure_files <- c(
+  missingness = here("output", "01_data_preparation", "01_case_information_missingness.png"),
+  counts = here("output", "02_monthly_trends", "01_monthly_report_counts.png"),
+  distribution = here("output", "02_monthly_trends", "02_monthly_distribution.png"),
+  ratios = here("output", "02_monthly_trends", "03_monthly_reporting_ratios.png"),
+  periods = here("output", "03_period_comparison", "01_product_reporting_ratios_by_period.png"),
+  events = here("output", "03_period_comparison", "02_event_reporting_ratio_comparisons.png"),
+  ror = here("output", "04_disproportionality", "01_product_event_ror.png")
+)
+
+required_files <- c(result_files, figure_files, here("template.docx"))
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0) {
+  stop(
+    "Required files are missing. Run scripts 01-04 and check the project root:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+prepared <- readRDS(result_files[["prepared"]])
+monthly <- readRDS(result_files[["monthly"]])
+periods <- readRDS(result_files[["periods"]])
+screening <- readRDS(result_files[["screening"]])
+
+cases <- prepared$cases
+quality <- prepared$quality_checks
+missingness <- prepared$missingness
+overall <- periods$overall_comparisons
+ror <- screening$ror_results
+recent_ror <- ror %>% filter(analysis_window == "2025 H2")
+review <- recent_ror %>%
+  filter(exploratory_review_flag) %>%
+  arrange(desc(ror_lower), desc(a))
+
+n_raw <- nrow(prepared$raw)
+n_cases <- nrow(cases)
+n_removed <- n_raw - n_cases
+n_review <- nrow(review)
+minimum_pair_reports <- screening$minimum_pair_reports
+
+# Validate core saved results before writing the report.
+# Figures are reused from the same analysis folders.
+
+stopifnot(
+  n_cases > 0,
+  !anyNA(cases$case_id),
+  !anyDuplicated(cases$case_id),
+  !anyNA(quality$n_flagged),
+  all(quality$n_flagged == 0),
+  sum(monthly$product_summary$total_reports) == n_cases,
+  nrow(overall) == 6,
+  nrow(recent_ror) == 24,
+  !anyNA(recent_ror$exploratory_review_flag),
+  length(minimum_pair_reports) == 1
+)
+
+fmt_n <- function(x) {
+  format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+fmt_num <- function(x, digits = 2) {
+  vapply(x, function(z) {
+    if (is.na(z)) return("Not estimable")
+    if (is.infinite(z)) return(if (z > 0) "Inf" else "-Inf")
+    formatC(z, format = "f", digits = digits)
+  }, character(1))
+}
+
+fmt_ci <- function(estimate, lower, upper) {
+  ifelse(
+    is.na(estimate),
+    "Not estimable",
+    paste0(fmt_num(estimate), " (", fmt_num(lower), ", ", fmt_num(upper), ")")
+  )
+}
+
+fmt_p <- function(x) {
+  ifelse(is.na(x), "Not estimable",
+         ifelse(x < 0.001, "<0.001", fmt_num(x, 3)))
+}
+
+# Reuse saved estimates in the narrative as well as in the tables.
+# Recheck the written interpretations whenever the analysis results change.
+
+period_ci <- function(product, reference) {
+  result <- overall %>%
+    filter(.data$product_id == .env$product,
+           .data$reference_period == .env$reference)
+  if (nrow(result) != 1L) {
+    stop("Expected one period comparison for ", product, " / ", reference)
+  }
+  fmt_ci(result$ratio, result$ratio_lower, result$ratio_upper)
+}
+
+product_reporting_ratios <- setNames(
+  monthly$product_summary$reports_per_100k_doses,
+  monthly$product_summary$product_id
+)
+
+b_vs_prior_year <- overall %>%
+  filter(product_id == "SYN_B", reference_period == "2024 H2")
+
+a_vomiting <- recent_ror %>%
+  filter(product_id == "SYN_A", primary_event == "Vomiting")
+
+full_review <- ror %>%
+  filter(analysis_window == "2023-2025", exploratory_review_flag) %>%
+  arrange(product_id, primary_event)
+
+stopifnot(
+  nrow(b_vs_prior_year) == 1L,
+  nrow(a_vomiting) == 1L,
+  all(c("SYN_A", "SYN_B", "SYN_C") %in% names(product_reporting_ratios))
+)
+
+a_vomiting_percent <- 100 * a_vomiting$a /
+  sum(recent_ror$a[recent_ror$product_id == "SYN_A"])
+
+full_review_labels <- paste(
+  paste(full_review$product_id, tolower(full_review$primary_event), sep = " / "),
+  collapse = "; "
+)
+
+review_text <- if (n_review == 0) {
+  paste(
+    "No product-event pairs met my exploratory review rule in 2025 H2.",
+    "This does not establish the absence of a safety issue."
+  )
+} else {
+  paste0(
+    "In 2025 H2, ", n_review, " of ", nrow(recent_ror),
+    " product-event pairs met my exploratory review rule. ",
+    "I retained their matching case records for further review; ",
+    "these flags do not establish causality."
+  )
+}
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  out.width = "6in"
+)
+```
+
+# Purpose and scope
+
+I developed this self-directed work sample to demonstrate an R-based veterinary pharmacovigilance workflow. I assessed data quality, compared report counts with product distribution, evaluated changes between periods, and screened product-event reporting patterns for further review.
+
+All cases, products, batches and distribution volumes are synthetic and were generated with AI assistance. This work is not an official hiring assignment and is not based on Boehringer Ingelheim data. It does not describe the safety of any real medicine.
+
+I analyzed `r fmt_n(n_cases)` unique cases after removing `r fmt_n(n_removed)` superseded versions from `r fmt_n(n_raw)` exported records. The dataset covers three fictional products, dogs and cats, and three countries, with initial reports received during 2023-2025. Each case contains one suspect product and one primary event. `r review_text`
+
+My main finding was an event-specific pattern for SYN_A / vomiting that was not apparent in its overall reporting ratio. SYN_B illustrated how report growth can accompany distribution growth, while the increase for SYN_C depended on the reference period. I use these contrasts to prioritize follow-up review within this synthetic exercise.
+
+# Data preparation and quality
+
+I retained the highest case version for each case identifier. Follow-up versions contributed updated information without being counted as new cases. I assigned reporting periods using the initial receipt date. The analysis therefore describes the final snapshot retrospectively rather than reconstructing the information available at an earlier review date.
+
+All `r nrow(quality)` saved record-level quality checks returned zero flagged records. These checks covered dates, selected numeric values, and consistency of seriousness and death outcomes. Missing optional fields remained missing. I counted both blank cells and explicit "Unknown" responses when summarizing information completeness. Passing these checks does not establish clinical validity or completeness of the reports.
+
+```{r}
+#| label: tbl-case-selection
+#| tbl-cap: "Case selection from the versioned export."
+
+knitr::kable(
+  prepared$selection_summary %>%
+    transmute(Stage = stage, Records = fmt_n(n)),
+  align = c("l", "r")
+)
+```
+
+@tbl-case-selection shows that the reduction in records came from removing superseded versions, rather than discarding unique cases. Retaining the latest information for all `r fmt_n(n_cases)` cases prevents follow-up submissions from inflating report counts while preserving their updates.
+
+@fig-missingness summarizes selected fields after version selection. I preserved the original export and saved the analysis dataset and quality-check results separately.
+
+```{r}
+#| label: fig-missingness
+#| fig-cap: "Missing or unknown information in the latest version of each unique case. Percentages use all retained cases as the denominator."
+
+knitr::include_graphics(figure_files[["missingness"]])
+```
+
+I found the greatest information gaps in outcome (14.9%; 446 cases) and concomitant medication (12.4%; 373 cases). Administration dates were missing or unknown in 10.9% (326 cases), and batch identifiers in 10.4% (312 cases). These gaps limit assessment of recovery, alternative explanations, temporal relationships and batch clustering. I would prioritize these fields during follow-up of the selected cases. The zero flagged validity checks therefore coexist with material gaps in information completeness.
+
+# Monthly reporting and distribution
+
+I aggregated cases by receipt month, product, species and country before joining the monthly distribution table. I retained the complete distribution grid and assigned zero reports only to strata without matching cases. Product-level reporting ratios were calculated from summed counts and summed doses, rather than by averaging stratum-specific ratios.
+
+```{r}
+#| label: tbl-product-summary
+#| tbl-cap: "Product-level reporting and distribution across 2023-2025."
+
+knitr::kable(
+  monthly$product_summary %>%
+    arrange(product_id) %>%
+    transmute(
+      Product = product_id,
+      Months = n_months,
+      Reports = fmt_n(total_reports),
+      `Distributed doses` = fmt_n(total_doses_distributed),
+      `Reports per 100,000 doses` = fmt_num(reports_per_100k_doses)
+    ),
+  align = c("l", "r", "r", "r", "r")
+)
+```
+
+SYN_A had both the largest report count and the largest distribution volume (@tbl-product-summary). After accounting for distributed doses, the three overall reporting ratios were close: `r fmt_num(product_reporting_ratios[["SYN_A"]])` for SYN_A, `r fmt_num(product_reporting_ratios[["SYN_B"]])` for SYN_B and `r fmt_num(product_reporting_ratios[["SYN_C"]])` for SYN_C per 100,000 doses. I therefore would not rank the products by raw report counts. These pooled descriptive values also do not establish equivalent safety or exclude event-specific differences.
+
+@fig-monthly-ratios shows report counts relative to distribution volume. The intervals describe Poisson count uncertainty conditional on the supplied denominators. They do not account for underreporting, changing reporting behavior, or uncertainty about actual product use. Separate count and distribution plots are provided at the end of this report.
+
+```{r}
+#| label: fig-monthly-ratios
+#| fig-cap: "Monthly reports per 100,000 distributed doses with pointwise 95% Poisson intervals. These descriptive ratios are pooled across species and countries and are not incidence estimates."
+
+knitr::include_graphics(figure_files[["ratios"]])
+```
+
+I observed substantial month-to-month variation rather than a uniform increase across all three products. SYN_B's higher reporting volume in 2025 was not accompanied by a comparably sustained increase in reports per distributed dose. SYN_C showed a prominent late-2025 peak with a wide interval. I would examine the event composition and underlying monthly counts before interpreting that isolated peak; the six-month comparisons below provide a less granular view.
+
+# Comparisons between periods
+
+I compared July-December 2025 with January-June 2025. I also compared July-December 2025 with July-December 2024 as a season-matched sensitivity analysis. For each comparison, I divided the current-period reports per distributed dose by the reference-period reports per distributed dose and calculated an exact conditional Poisson interval.
+
+Values above 1 indicate a higher descriptive reporting ratio in 2025 H2. The two comparisons share the same current period and are not independent replications. The season-matched comparison addresses calendar season but does not adjust for changes in case mix or reporting behavior.
+
+I treated the six overall comparisons as exploratory; their confidence intervals were not adjusted for multiple comparisons.
+
+```{r}
+#| label: tbl-period-comparisons
+#| tbl-cap: "Overall reporting ratio comparisons with 2025 H2 as the current period."
+
+knitr::kable(
+  overall %>%
+    arrange(product_id, reference_period) %>%
+    transmute(
+      Product = product_id,
+      Reference = reference_period,
+      `Current n` = current_n,
+      `Reference n` = reference_n,
+      `Ratio of reporting ratios (95% CI)` =
+        fmt_ci(ratio, ratio_lower, ratio_upper)
+    ),
+  align = c("l", "l", "r", "r", "l")
+)
+```
+
+```{r}
+#| label: fig-period-ratios
+#| fig-cap: "Product-level reporting ratios for the three six-month periods, with pointwise 95% Poisson intervals."
+
+knitr::include_graphics(figure_files[["periods"]])
+```
+
+I drew three product-specific conclusions from @tbl-period-comparisons and @fig-period-ratios:
+
+- **SYN_A:** The ratio of reporting ratios was `r period_ci("SYN_A", "2025 H1")` against the preceding half-year and `r period_ci("SYN_A", "2024 H2")` against the same half-year in 2024. Both intervals included 1. The overall results did not show a clear increase, but they could conceal changes in individual events.
+- **SYN_B:** Reports rose from `r fmt_n(b_vs_prior_year$reference_n)` in 2024 H2 to `r fmt_n(b_vs_prior_year$current_n)` in 2025 H2, an increase of `r fmt_num(100 * (b_vs_prior_year$current_n / b_vs_prior_year$reference_n - 1), 1)`%. After accounting for distribution, the ratio was `r period_ci("SYN_B", "2024 H2")`; the comparison with 2025 H1 was `r period_ci("SYN_B", "2025 H1")`. I interpret the higher count as consistent with the accompanying growth in distribution, without clear evidence of an increase in the overall reporting ratio.
+- **SYN_C:** The ratio was `r period_ci("SYN_C", "2024 H2")` against the same half-year in 2024, but `r period_ci("SYN_C", "2025 H1")` against the preceding half-year. Only the former interval excluded 1. This finding depends on the reference period and does not establish an abrupt increase beginning in 2025 H2. I would review which events and strata contributed to the year-over-year difference.
+
+I also examined changes for each primary event (@fig-event-periods). These comparisons are exploratory and unadjusted. Boundary estimates that cannot be displayed on the log scale remain in the full saved results table. An interval excluding 1 alone is insufficient to identify a causal safety issue.
+
+```{r}
+#| label: fig-event-periods
+#| fig-cap: "Event-specific reporting ratio comparisons using 2025 H2 as the current period. Intervals are pointwise 95% exact conditional Poisson intervals and are not adjusted for multiple comparisons."
+
+knitr::include_graphics(figure_files[["events"]])
+```
+
+SYN_A / vomiting was the clearest event-specific finding: its reporting ratio increased against both reference periods, with both intervals above 1 (@fig-event-periods). This contrasts with the modest changes in SYN_A's overall ratio and demonstrates why I examined individual events. For SYN_B, every displayed event-specific interval included 1. For SYN_C, vomiting and decreased appetite had higher point estimates against 2024 H2, but the comparisons against 2025 H1 were less pronounced and their intervals included 1. I would treat these as reference-sensitive patterns requiring further examination.
+
+# Product and event disproportionality
+
+I calculated reporting odds ratios (RORs) within 2025 H2 and within the full 2023-2025 window. For each target product and event, I compared the odds of that event versus other primary events with the corresponding odds among reports for the other two products. This analysis uses the composition of reports and does not use distributed doses as a denominator.
+
+For positive cells, I used the cross-product ROR and a log-Wald 95% interval. When a table contained a zero cell, I added 0.5 to all four cells and labeled the estimate as corrected. Tables with an empty margin were not estimable. I also calculated two-sided Fisher exact p-values and applied the Benjamini-Hochberg adjustment to the 24 tests within each window. The confidence intervals were not multiplicity adjusted. Tests share reports and comparator groups, so adjusted p-values remain exploratory.
+
+My review rule required at least `r minimum_pair_reports` target product-event reports, no zero-cell correction, and a lower ROR interval bound above 1. Adjusted p-values were reported separately and were not part of this rule. This is a rule for organizing this work sample, not a regulatory or company signal threshold. Sparse tables can still produce unstable estimates even when no correction is needed.
+
+```{r}
+#| label: tbl-review-summary
+#| tbl-cap: "Exploratory screening workload by analysis window. The two windows overlap."
+
+knitr::kable(
+  screening$review_summary %>%
+    transmute(
+      Window = analysis_window,
+      Pairs = n_product_event_pairs,
+      Estimable = n_estimable_pairs,
+      Corrected = n_corrected_pairs,
+      Sparse = n_sparse_pairs,
+      Flagged = n_pairs_for_exploratory_review
+    ),
+  align = c("l", rep("r", 5))
+)
+```
+
+Sparse indicates at least one cell below 5. Flagged indicates that the pair met the exploratory review rule. Neither label implies a validated signal. @fig-ror includes all estimable pairs that can be displayed on the log scale.
+
+All 24 pairs were estimable in each window, and no table required zero-cell correction or met the sparse-cell definition (@tbl-review-summary). The full-window review rule selected `r nrow(full_review)` pairs: `r full_review_labels`. In 2025 H2, only SYN_A / vomiting met the rule. The difference in flagged pairs may reflect changes in report composition and precision across windows; it does not show that the other full-window findings have resolved.
+
+```{r}
+#| label: fig-ror
+#| fig-cap: "Product-event reporting odds ratios with pointwise 95% log-Wald intervals. Each product is compared with the other two products in the same window. Corrected estimates are marked in the figure."
+
+knitr::include_graphics(figure_files[["ror"]])
+```
+
+@fig-ror places SYN_A / vomiting above 1 in both windows, with a larger point estimate in 2025 H2. This supports prioritizing its recent reports for review. I would not interpret RORs below 1 as protective effects: an increase in the share of one event can reduce the relative share of other events within the same reporting dataset.
+
+## Recent pairs retained for review
+
+`r review_text`
+
+```{r}
+#| label: recent-review-table
+#| results: asis
+
+if (nrow(review) > 0) {
+  review_table <- review %>%
+    transmute(
+      Product = product_id,
+      Event = primary_event,
+      `Target n` = a,
+      `ROR (95% CI)` = fmt_ci(ror, ror_lower, ror_upper),
+      `BH-adjusted p` = fmt_p(p_adjusted_bh),
+      `Sparse cells` = ifelse(sparse_cell_flag, "Yes", "No")
+    )
+  cat(knitr::kable(review_table,
+                   align = c("l", "l", "r", "l", "r", "l")),
+      sep = "\n")
+} else {
+  cat("There are no flagged pairs to list for this window.\n")
+}
+```
+
+The selected SYN_A / vomiting pair contained `r fmt_n(a_vomiting$a)` reports, representing `r fmt_num(a_vomiting_percent, 1)`% of SYN_A reports in 2025 H2. Its ROR was `r fmt_ci(a_vomiting$ror, a_vomiting$ror_lower, a_vomiting$ror_upper)` and its BH-adjusted p-value was `r fmt_p(a_vomiting$p_adjusted_bh)`. This means that the odds of vomiting versus other primary events among SYN_A reports were higher than the corresponding odds among reports for the other two products. It is not an estimate of how much more likely a treated animal was to vomit.
+
+I retained all matching case records for flagged recent pairs without selecting by outcome. The saved line listing contains `r fmt_n(nrow(screening$recent_review_cases))` unique cases. This creates a review queue; a clinical case assessment has not been performed.
+
+# Interpretation and next steps
+
+I would prioritize SYN_A / vomiting because it showed both an increase in event-specific reports per distributed dose across periods and higher reporting odds relative to other products in the recent window. The two analyses address different questions but use overlapping reports, so I do not treat their agreement as independent confirmation. Together, they identify where a more detailed review would be most useful.
+
+My next steps are:
+
+1. **Review the SYN_A / vomiting cases.** I will summarize seriousness, outcome, time from administration to onset where dates are available, concomitant medication, and off-label use. I will assess completeness specifically within these cases and describe any concentration by country, species, month or batch.
+2. **Assess the stability of the prioritized patterns.** I will compare species and country strata, examine each alternative product separately as a comparator, and assess whether the SYN_A pattern persists after accounting for time and distribution. For SYN_C, I will examine which events and strata contributed to the difference from 2024 H2 and why the adjacent-period comparison was weaker.
+3. **Examine batch patterns.** I will examine batch-event counts and timing for the prioritized cases and review ataxia reports separately. The current figures do not establish a batch-specific finding. Missing batch identifiers and the absence of batch-level dose denominators limit what I can conclude; batch-specific incidence cannot be estimated.
+
+These follow-up analyses have not yet been performed. The current results support a prioritized review plan, while leaving the clinical and causal interpretation unresolved.
+
+This dataset simplifies reporting to one animal, one suspect product and one primary event per case. Its event terms and seriousness rules are training definitions. Complete clinical narratives are unavailable. The simulation deliberately introduced distribution growth, seasonality and selected product-event or batch-event patterns. Recovering those patterns demonstrates the workflow on this dataset, not its performance on real surveillance data.
+
+# Reproducibility
+
+I organized the work into four scripts covering preparation, monthly trends, period comparisons and disproportionality. This report reads their saved RDS results and PNG figures without rerunning the analyses. When an analysis changes, its downstream scripts and figures must be regenerated before I render the report again. I will also recheck the written interpretations and information-completeness summaries. Each analysis folder contains its own session information; these records describe the analysis environment rather than only the reporting session.
+
+{{< pagebreak >}}
+
+# Supplementary monthly views
+
+```{r}
+#| label: fig-monthly-counts
+#| fig-cap: "Monthly counts of unique reports based on initial receipt dates. Follow-up versions are not counted as new cases."
+
+knitr::include_graphics(figure_files[["counts"]])
+```
+
+@fig-monthly-counts shows a higher reporting workload for SYN_B in 2025, together with considerable monthly variation for all products. I use this view to describe case volume and locate periods for review. The corresponding distribution pattern is needed to assess whether more reports also mean more reports per distributed dose.
+
+```{r}
+#| label: fig-monthly-distribution
+#| fig-cap: "Monthly distributed doses pooled across species and countries. These synthetic volumes do not represent unique treated animals."
+
+knitr::include_graphics(figure_files[["distribution"]])
+```
+
+@fig-monthly-distribution shows recurring within-year variation and a marked increase in SYN_B distribution in 2025. This provides context for its larger report counts and is consistent with the near-1 overall period comparisons after accounting for volume. I therefore interpret the count and distribution plots together. Distributed doses remain a proxy for product use and do not identify how many individual animals were treated.

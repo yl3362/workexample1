@@ -1,0 +1,13 @@
+"check","n_flagged"
+"Missing initial receipt date",0
+"Missing version receipt date",0
+"Initial receipt outside study period",0
+"Version received before initial receipt",0
+"Version received after snapshot",0
+"Administration after event onset",0
+"Event onset after initial receipt",0
+"Administration after initial receipt",0
+"Nonpositive age",0
+"Nonpositive weight",0
+"Inconsistent seriousness flag",0
+"Inconsistent death outcome",0
